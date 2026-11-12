@@ -270,6 +270,10 @@ public class TrackingService extends Service implements SensorEventListener, Loc
         rawX+=rawVE*dt;rawY+=rawVN*dt;
         if("drive".equals(mode)){
             driveModel.addWorldAcceleration(time,east,north);
+            if(blackoutActive && time-blackoutStartNs>=124_000_000_000L){
+                blackoutActive=false;blackoutFinished=true;
+                logAt(time,"BLACKOUT_END","completed 120s comparison window",0,0,0,0);
+            }
             if(driveModel.initialized){
                 x=driveModel.x;y=driveModel.y;speed=driveModel.speed;
                 heading=(float)Math.toDegrees(driveModel.headingRad);
@@ -383,7 +387,9 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                         } else if(gpsSpeed<.30f && speedAcc<.35f && driveModel.initialized){
                             // Genuine zero speed must be independently confirmed
                             // by GNSS Doppler, NOT only by a quiet accelerometer.
-                            driveModel.setKnownStop(e,n);
+                            // Once stopped, repeated GPS coordinate jitter should not move the blue dot.
+                            driveModel.setKnownStop(driveModel.speed<.30f?driveModel.x:e,
+                                    driveModel.speed<.30f?driveModel.y:n);
                             logAt(stamp,"GPS_ZERO_SPEED","trusted velocity",0,0,0,0);
                         }
                         if(driveModel.initialized){
@@ -400,12 +406,10 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                         logAt(stamp,"GPS_REFERENCE",
                                 "elapsed="+seconds+";gpsAcc="+acc+";speedAcc="+speedAcc,
                                 e,n,errorNow,baseErrorNow);
-                        if(seconds>=30f && Float.isNaN(err30)){err30=errorNow;baseErr30=baseErrorNow;}
-                        if(seconds>=60f && Float.isNaN(err60)){err60=errorNow;baseErr60=baseErrorNow;}
-                        if(seconds>=120f && Float.isNaN(err120)){
+                        if(seconds>=30f && seconds<=33f && Float.isNaN(err30)){err30=errorNow;baseErr30=baseErrorNow;}
+                        if(seconds>=60f && seconds<=63f && Float.isNaN(err60)){err60=errorNow;baseErr60=baseErrorNow;}
+                        if(seconds>=120f && seconds<=123f && Float.isNaN(err120)){
                             err120=errorNow;baseErr120=baseErrorNow;
-                            blackoutActive=false;blackoutFinished=true;
-                            logAt(stamp,"BLACKOUT_END","GPS corrections resumed on next fix",e,n,errorNow,baseErrorNow);
                         }
                     }
                 }else{
