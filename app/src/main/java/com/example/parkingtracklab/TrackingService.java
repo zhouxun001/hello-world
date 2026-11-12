@@ -307,7 +307,7 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 float maxDistance=12f+acc*2f+("drive".equals(mode)?25f:4.5f)*dt;
                 if(dt>0 && dt<10 && Math.hypot(ne-lastFixE,nn-lastFixN)>maxDistance)trustworthy=false;
             }
-            gpsText=String.format(Locale.CHINA,"%s · ±%.1f m%s",provider,acc,trustworthy?" · 用于校正":" · 仅记录不校正");
+            gpsText=String.format(Locale.CHINA,"%s · ±%.1f m%s",provider,acc,trustworthy?("drive".equals(mode)?" · 可用于驾车校正":" · 仅观测，不改步行轨迹"):" · 仅记录不校正");
             logAt(loc.getElapsedRealtimeNanos(),"GPS",provider,loc.getLatitude()==0?0:(float)loc.getLatitude(),(float)loc.getLongitude(),acc,loc.hasSpeed()?loc.getSpeed():-1);
             if(trustworthy){
                 if(!anchored){
@@ -315,9 +315,14 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                     GeomagneticField mag=new GeomagneticField((float)anchorLat,(float)anchorLon,
                             loc.hasAltitude()?(float)loc.getAltitude():0,System.currentTimeMillis());
                     declination=mag.getDeclination();
-                    x=y=rawX=rawY=0;velE=velN=rawVE=rawVN=0;
-                    track.clear();rawTrack.clear();gpsTrack.clear();markers.clear();
-                    track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));
+                    // Walking is step-driven. Setting a geographic anchor must NOT reset
+                    // or move the walking estimate, nor retroactively erase steps.
+                    if("drive".equals(mode)) {
+                        x=y=rawX=rawY=0;velE=velN=rawVE=rawVN=0;
+                        track.clear();rawTrack.clear();markers.clear();
+                        track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));
+                    }
+                    gpsTrack.clear();
                     logAt(loc.getElapsedRealtimeNanos(),"ANCHOR_SET","true_north_gps_vs_magnetic_heading",0,0,0,0);
                 }
                 // Equirectangular short-distance projection, meters. Only meaningful near anchor.
@@ -326,16 +331,24 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 float n=(float)((loc.getLatitude()-anchorLat)*111132.0);
                 gpsTrack.add(new TrackStore.Pt(e,n));
                 lastFixE=e;lastFixN=n;lastFixNs=loc.getElapsedRealtimeNanos();
-                x=e;y=n;
+                // Keep the GPS observation as a separate diagnostic series in walk mode.
+                // Horizontal GPS jitter is NOT evidence that steps have occurred.
+                if("drive".equals(mode)) {
+                    x=e;y=n;
+                }
                 if("drive".equals(mode) && loc.hasSpeed() && loc.hasBearing()){
                     float bearing=(float)Math.toRadians(loc.getBearing());
                     velE=loc.getSpeed()*(float)Math.sin(bearing);
                     velN=loc.getSpeed()*(float)Math.cos(bearing);
                 }
-                speed=loc.hasSpeed()?loc.getSpeed():speed;
                 lastGoodGpsNs=loc.getElapsedRealtimeNanos();
-                source="高精度 GPS";
-                track.add(new TrackStore.Pt(x,y));
+                if("drive".equals(mode)) {
+                    speed=loc.hasSpeed()?loc.getSpeed():speed;
+                    source="GPS 校正的驾车估计";
+                    track.add(new TrackStore.Pt(x,y));
+                } else {
+                    source="步行：仅按检测到的步数移动";
+                }
             }
             publish();
         }
