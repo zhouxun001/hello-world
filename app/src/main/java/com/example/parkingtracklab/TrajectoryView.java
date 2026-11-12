@@ -16,6 +16,8 @@ public class TrajectoryView extends View {
     private final Paint p=new Paint(Paint.ANTI_ALIAS_FLAG);
     private TrackStore.Snapshot data=new TrackStore.Snapshot();
     private final float density;
+    private boolean showGps=false, showRaw=false;
+    public void setDiagnostics(boolean gps,boolean raw){showGps=gps;showRaw=raw;invalidate();}
     public TrajectoryView(Context context) {super(context);density=getResources().getDisplayMetrics().density;}
     public void setData(TrackStore.Snapshot next){data=next;invalidate();}
     private float dp(float v){return v*density;}
@@ -27,7 +29,7 @@ public class TrajectoryView extends View {
         float left=dp(20),right=w-dp(18),top=dp(23),bottom=h-dp(24);
         float minE=0,maxE=0,minN=0,maxN=0;
         for(TrackStore.Pt pt:data.fused){minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);}
-        for(TrackStore.Pt pt:data.gps){minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);}
+        if(showGps)for(TrackStore.Pt pt:data.gps){minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);}
         minE=Math.min(minE,data.east);maxE=Math.max(maxE,data.east);
         minN=Math.min(minN,data.north);maxN=Math.max(maxN,data.north);
         float midE=(minE+maxE)/2,midN=(minN+maxN)/2;
@@ -52,8 +54,16 @@ public class TrajectoryView extends View {
         }
         float originX=cx-midE*scale,originY=cy+midN*scale;
         color(0xffbccad6,1.2f);c.drawLine(originX,top,originX,bottom,p);c.drawLine(left,originY,right,originY,p);
-        drawPath(c,data.inertial,0xffe8a34e,1.5f,true,cx,cy,midE,midN,scale);
-        drawPath(c,data.gps,0xff2bae91,2.0f,false,cx,cy,midE,midN,scale);
+        if(showRaw)drawPath(c,data.inertial,0xffe8a34e,1.5f,true,cx,cy,midE,midN,scale);
+        // GPS is displayed as isolated observations: connecting fixes implies motion that
+        // may not have occurred. In particular, static phones still have GPS jitter.
+        if(showGps) {
+            color(0xff2bae91,1);
+            for(TrackStore.Pt pt:data.gps) {
+                float gx=cx+(pt.e-midE)*scale,gy=cy-(pt.n-midN)*scale;
+                c.drawCircle(gx,gy,dp(2),p);
+            }
+        }
         drawPath(c,data.fused,0xff3976e7,3.2f,false,cx,cy,midE,midN,scale);
         color(0xff2bae91,1);
         c.drawCircle(originX,originY,dp(5),p);
@@ -76,12 +86,15 @@ public class TrajectoryView extends View {
         drawLegend(c,w,h);
     }
     private void drawLegend(Canvas c,float w,float h){
-        String[] names={"估计轨迹","原始二次积分","GPS"};int[] cols={0xff3976e7,0xffe8a34e,0xff2bae91};
         float px=dp(17),py=h-dp(43);
+        String[] names={"估计轨迹","原始积分漂移","GPS散点"};
+        int[] cols={0xff3976e7,0xffe8a34e,0xff2bae91};
         for(int i=0;i<3;i++){
+            if(i==1 && !showRaw)continue;
+            if(i==2 && !showGps)continue;
             color(cols[i],3);c.drawLine(px,py,px+dp(13),py,p);
             color(0xff697b91,1);p.setTextSize(dp(10));c.drawText(names[i],px+dp(16),py+dp(4),p);
-            px+=dp(i==1?100:105);
+            px+=dp(103);
         }
     }
     private void drawPath(Canvas c,List<TrackStore.Pt> points,int color,float width,boolean dash,
