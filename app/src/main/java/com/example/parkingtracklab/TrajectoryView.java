@@ -29,6 +29,9 @@ public class TrajectoryView extends View {
         float left=dp(20),right=w-dp(18),top=dp(23),bottom=h-dp(24);
         float minE=0,maxE=0,minN=0,maxN=0;
         for(TrackStore.Pt pt:data.fused){minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);}
+        if("驾车".equals(data.mode))for(TrackStore.Pt pt:data.baseline){
+            minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);
+        }
         if(showGps)for(TrackStore.Pt pt:data.gps){minE=Math.min(minE,pt.e);maxE=Math.max(maxE,pt.e);minN=Math.min(minN,pt.n);maxN=Math.max(maxN,pt.n);}
         minE=Math.min(minE,data.east);maxE=Math.max(maxE,data.east);
         minN=Math.min(minN,data.north);maxN=Math.max(maxN,data.north);
@@ -55,6 +58,7 @@ public class TrajectoryView extends View {
         float originX=cx-midE*scale,originY=cy+midN*scale;
         color(0xffbccad6,1.2f);c.drawLine(originX,top,originX,bottom,p);c.drawLine(left,originY,right,originY,p);
         if(showRaw)drawPath(c,data.inertial,0xffe8a34e,1.5f,true,cx,cy,midE,midN,scale);
+        if("驾车".equals(data.mode))drawPath(c,data.baseline,0xff8f70e7,2.0f,true,cx,cy,midE,midN,scale);
         // GPS is displayed as isolated observations: connecting fixes implies motion that
         // may not have occurred. In particular, static phones still have GPS jitter.
         if(showGps) {
@@ -87,14 +91,21 @@ public class TrajectoryView extends View {
     }
     private void drawLegend(Canvas c,float w,float h){
         float px=dp(17),py=h-dp(43);
-        String[] names={"估计轨迹","原始积分漂移","GPS散点"};
-        int[] cols={0xff3976e7,0xffe8a34e,0xff2bae91};
-        for(int i=0;i<3;i++){
-            if(i==1 && !showRaw)continue;
-            if(i==2 && !showGps)continue;
-            color(cols[i],3);c.drawLine(px,py,px+dp(13),py,p);
-            color(0xff697b91,1);p.setTextSize(dp(10));c.drawText(names[i],px+dp(16),py+dp(4),p);
-            px+=dp(103);
+        String[] names="驾车".equals(data.mode)?
+            new String[]{"模型轨迹","恒速基线","GPS散点","原始积分"}:
+            new String[]{"步行轨迹","GPS散点","原始积分"};
+        int[] cols="驾车".equals(data.mode)?
+            new int[]{0xff3976e7,0xff8f70e7,0xff2bae91,0xffe8a34e}:
+            new int[]{0xff3976e7,0xff2bae91,0xffe8a34e};
+        int shown=0;
+        for(int i=0;i<names.length;i++){
+            if("GPS散点".equals(names[i])&&!showGps)continue;
+            if("原始积分".equals(names[i])&&!showRaw)continue;
+            float lx=px+(shown%3)*dp(102),ly=py+(shown/3)*dp(15);
+            color(cols[i],3);c.drawLine(lx,ly,lx+dp(12),ly,p);
+            color(0xff697b91,1);p.setTextSize(dp(9.5f));
+            c.drawText(names[i],lx+dp(15),ly+dp(4),p);
+            shown++;
         }
     }
     private void drawPath(Canvas c,List<TrackStore.Pt> points,int color,float width,boolean dash,
