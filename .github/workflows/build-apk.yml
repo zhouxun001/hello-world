@@ -22,6 +22,11 @@ jobs:
           gradle-version: '8.12'
       - name: Install Android SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Vehicle model smoke tests
+        run: |
+          mkdir -p build/drive-test
+          javac -d build/drive-test app/src/main/java/com/example/parkingtracklab/DriveModel.java tests/DriveModelSmokeTest.java
+          java -cp build/drive-test com.example.parkingtracklab.DriveModelSmokeTest
       - name: Build
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
