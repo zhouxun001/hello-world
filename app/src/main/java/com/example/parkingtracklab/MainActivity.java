@@ -30,9 +30,9 @@ public class MainActivity extends Activity {
     private static final int BLUE=0xff2768d8, DARK=0xff152c44, SUB=0xff6b7c90, WHITE=Color.WHITE;
     private LinearLayout root, container;
     private Button walk,drive,start,stop,mark,reset,export,stepMinus,stepPlus;
-    private TextView status,coordinates,details,stats,modeLabel,strideText;
+    private TextView status,coordinates,details,stats,modeLabel,strideText,driveMetrics;
     private TrajectoryView graph;
-    private CheckBox gpsLayer,rawLayer;
+    private CheckBox gpsLayer,rawLayer,simulateBlackout;
     private boolean driving=false;
     private float stride=.7f;
     private String pendingMode="walk";
@@ -90,6 +90,10 @@ public class MainActivity extends Activity {
         walk.setOnClickListener(v->{driving=false;updateModes();});
         drive.setOnClickListener(v->{driving=true;updateModes();});
         TextView hint=text("步行：手机顶部朝向前进方向；驾车：手机固定在支架上。",12,SUB,false);add(container,hint,8);
+        simulateBlackout=new CheckBox(this);
+        simulateBlackout.setText("模拟 GPS 断联：连续获得 15 秒可靠行驶定位后，自动屏蔽 GPS 校正 120 秒");
+        simulateBlackout.setTextSize(13);simulateBlackout.setTextColor(DARK);
+        add(container,simulateBlackout,13);
         TextView section=text("02 · 实时水平轨迹",14,DARK,true);add(container,section,23);
         graph=new TrajectoryView(this);graph.setBackground(bg(WHITE,17));
         LinearLayout.LayoutParams gp=new LinearLayout.LayoutParams(-1,dp(360));gp.topMargin=dp(10);
@@ -102,6 +106,8 @@ public class MainActivity extends Activity {
         gpsLayer.setOnCheckedChangeListener((v,checked)->graph.setDiagnostics(gpsLayer.isChecked(),rawLayer.isChecked()));
         rawLayer.setOnCheckedChangeListener((v,checked)->graph.setDiagnostics(gpsLayer.isChecked(),rawLayer.isChecked()));
         stats=text("等待开始记录",20,DARK,true);add(container,stats,18);
+        driveMetrics=text("驾车 GPS 断联对照：待开始",12,DARK,false);
+        driveMetrics.setLineSpacing(dp(3),1);add(container,driveMetrics,9);
         status=text("尚未启动",14,BLUE,true);add(container,status,8);
         coordinates=text("东向 0.0 m  ·  北向 0.0 m",13,DARK,false);add(container,coordinates,7);
         details=text("GPS：等待中\n传感器：等待中",12,SUB,false);details.setLineSpacing(dp(4),1);add(container,details,8);
@@ -134,6 +140,8 @@ public class MainActivity extends Activity {
         updateModes();
     }
     private void updateModes(){
+        if(simulateBlackout!=null)simulateBlackout.setVisibility(driving?View.VISIBLE:View.GONE);
+        if(gpsLayer!=null && !TrackingService.isRunning())gpsLayer.setChecked(driving);
         walk.setBackground(bg(driving?0xffe1e8f1:BLUE,13));walk.setTextColor(driving?DARK:WHITE);
         drive.setBackground(bg(driving?BLUE:0xffe1e8f1,13));drive.setTextColor(driving?WHITE:DARK);
     }
@@ -170,6 +178,7 @@ public class MainActivity extends Activity {
     }
     private void doStart(){
         Intent i=new Intent(this,TrackingService.class);i.setAction(TrackingService.START);i.putExtra("mode",pendingMode);
+        i.putExtra("simulateBlackout",driving && simulateBlackout.isChecked());
         try{startForegroundService(i);}catch(Exception ex){Toast.makeText(this,"无法启动："+ex.getMessage(),Toast.LENGTH_LONG).show();}
     }
     private void send(String action,String label){Intent i=new Intent(this,TrackingService.class);i.setAction(action);if(label!=null)i.putExtra("label",label);startService(i);}
@@ -188,18 +197,39 @@ public class MainActivity extends Activity {
     private void render(){
         TrackStore.Snapshot s=TrackStore.INSTANCE.get();
         graph.setData(s);
+        if(driveMetrics!=null){
+            boolean isDrive="驾车".equals(s.mode);
+            driveMetrics.setVisibility(isDrive?View.VISIBLE:View.GONE);
+            if(isDrive){
+                String phase=s.blackoutFinished?"120 秒对照已完成":
+                        s.blackoutActive?"GPS 断联中 · "+s.blackoutSeconds+" 秒":
+                        s.blackoutRequested?"等待连续 15 秒有效驾车 GPS":"正常 GPS / 惯导切换";
+                driveMetrics.setText("测试状态："+phase+
+                        String.format(Locale.CHINA,"\n当前误差：模型 %s / 恒速 %s",
+                            fmtError(s.errorNow),fmtError(s.baseErrorNow))+
+                        String.format(Locale.CHINA,"\n30秒：%s / %s   60秒：%s / %s   120秒：%s / %s",
+                            fmtError(s.error30),fmtError(s.baseError30),
+                            fmtError(s.error60),fmtError(s.baseError60),
+                            fmtError(s.error120),fmtError(s.baseError120))+
+                        "\n（左：加速度模型；右：恒速模型；对照 GPS 测量，非绝对真值）");
+            }
+        }
         start.setEnabled(!s.running);stop.setEnabled(s.running);
         walk.setEnabled(!s.running);drive.setEnabled(!s.running);
         mark.setEnabled(s.running);reset.setEnabled(s.running);export.setEnabled(!s.running);
+        if(simulateBlackout!=null)simulateBlackout.setEnabled(!s.running);
         stepMinus.setEnabled(!driving);stepPlus.setEnabled(!driving);
         String minutes=String.format(Locale.US,"%02d:%02d",s.elapsedMs/60_000,(s.elapsedMs/1000)%60);
-        stats.setText(s.running?"记录中  "+minutes+"   ·   "+s.steps+" 步":s.file.isEmpty()?"等待开始记录":"上次记录已结束");
+        stats.setText(s.running?"记录中 "+minutes+("驾车".equals(s.mode)?String.format(Locale.US," · 估计速度 %.1f km/h",s.speed*3.6f):" · "+s.steps+" 步"):s.file.isEmpty()?"等待开始记录":"上次记录已结束");
         status.setText(s.source);
         coordinates.setText(String.format(Locale.US,"东向 %+.1f m · 北向 %+.1f m · 距起点 %.1f m",
                 s.east,s.north,Math.hypot(s.east,s.north)));
         String gpsOrigin=s.gpsAnchored?String.format(Locale.US,"锚点 %.6f, %.6f",s.lat,s.lon):"本地原点：0,0（无 GPS 锚点）";
         details.setText("GPS："+s.gpsText+"\n"+gpsOrigin+"\n设备："+s.sensorText+
                 String.format(Locale.US,"\n手机顶部指向 %.0f°（磁北参考） · 原始积分：%+.1f / %+.1f m",s.heading,s.rawEast,s.rawNorth));
+    }
+    private String fmtError(float meters){
+        return Float.isNaN(meters)?"—":String.format(Locale.US,"%.1f m",meters);
     }
     @Override protected void onResume(){super.onResume();handler.removeCallbacks(ticker);handler.post(ticker);}
     @Override protected void onPause(){handler.removeCallbacks(ticker);super.onPause();}
