@@ -60,6 +60,13 @@ public class TrackingService extends Service implements SensorEventListener, Loc
     private final float[] matrix=new float[9];
     private final ArrayList<TrackStore.Pt> track=new ArrayList<>(), rawTrack=new ArrayList<>(), gpsTrack=new ArrayList<>(), markers=new ArrayList<>();
     private static final float MAX_CAR_SPEED=22f;
+    private final DriveModel driveModel=new DriveModel();
+    private final ArrayList<TrackStore.Pt> baselineTrack=new ArrayList<>();
+    private boolean simulateBlackout=false,blackoutActive=false,blackoutFinished=false;
+    private long sustainedDrivingNs=0,blackoutStartNs=0;
+    private float errorNow=Float.NaN,baseErrorNow=Float.NaN;
+    private float err30=Float.NaN,err60=Float.NaN,err120=Float.NaN;
+    private float baseErr30=Float.NaN,baseErr60=Float.NaN,baseErr120=Float.NaN;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -71,7 +78,7 @@ public class TrackingService extends Service implements SensorEventListener, Loc
     }
     @Override public int onStartCommand(Intent intent,int flags,int startId) {
         String action=intent==null?"":intent.getAction();
-        if(START.equals(action)) startSession("drive".equals(intent.getStringExtra("mode"))?"drive":"walk");
+        if(START.equals(action)) startSession("drive".equals(intent.getStringExtra("mode"))?"drive":"walk",intent.getBooleanExtra("simulateBlackout",false));
         else if(STOP.equals(action)) stopSession();
         else if(MARK.equals(action)) mark(intent.getStringExtra("label"));
         else if(STRIDE.equals(action)) { synchronized(lock) { stride=Math.min(.95f,Math.max(.35f,intent.getFloatExtra("stride",.7f))); log("SETTING","stride="+stride,0,0,0,0); publish(); } }
@@ -88,7 +95,7 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                         android.app.PendingIntent.FLAG_UPDATE_CURRENT|android.app.PendingIntent.FLAG_IMMUTABLE))
                 .build();
     }
-    private void startSession(String chosen) {
+    private void startSession(String chosen, boolean simulate) {
         synchronized(lock) {
             if(running) return;
             try {
@@ -99,13 +106,18 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 gpsText="无法启动前台定位："+ex.getClass().getSimpleName();publish();stopSelf();return;
             }
             mode=chosen;
+            simulateBlackout=simulate && "drive".equals(chosen);
+            blackoutActive=blackoutFinished=false;
+            sustainedDrivingNs=blackoutStartNs=0;
+            errorNow=baseErrorNow=err30=err60=err120=baseErr30=baseErr60=baseErr120=Float.NaN;
+            driveModel.reset(); baselineTrack.clear();
             tStartNs=SystemClock.elapsedRealtimeNanos(); tStartWallMs=System.currentTimeMillis();
             prevAccelNs=lastPointNs=lastStepNs=stationarySinceNs=lastGoodGpsNs=0;
             steps=0; anchored=false; hasRotation=false;lastFixNs=0;declination=0;
             velE=velN=rawVE=rawVN=x=y=rawX=rawY=heading=speed=accelMagnitude=0;
             source="等待传感器";gpsText="等待 GPS（室内可从本地原点开始）";sensorText="等待设备数据";
             track.clear();rawTrack.clear();gpsTrack.clear();markers.clear();
-            track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));
+            track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));baselineTrack.add(new TrackStore.Pt(0,0));
             String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.US).format(new Date());
             fileName="track_"+stamp+"_"+mode+".csv";
             try {
@@ -122,7 +134,7 @@ public class TrackingService extends Service implements SensorEventListener, Loc
             PowerManager pm=(PowerManager)getSystemService(POWER_SERVICE);
             wakeLock=pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,"ParkingTrackLab:recording");
             wakeLock.acquire(2*60*60*1000L); // Safety time limit: at most two hours.
-            log("START",mode,0,0,0,0);
+            log("START",mode+(simulateBlackout?"_auto_gps_blackout_after_15s_moving":""),0,0,0,0);
             setupSensors();
             setupLocation();
             publish();
@@ -194,6 +206,9 @@ public class TrackingService extends Service implements SensorEventListener, Loc
             x=y=rawX=rawY=velE=velN=rawVE=rawVN=0;
             track.clear();rawTrack.clear();gpsTrack.clear();markers.clear();
             track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));
+            driveModel.reset();baselineTrack.clear();baselineTrack.add(new TrackStore.Pt(0,0));
+            blackoutActive=blackoutFinished=false;sustainedDrivingNs=blackoutStartNs=0;
+            err30=err60=err120=baseErr30=baseErr60=baseErr120=errorNow=baseErrorNow=Float.NaN;
             // Relocating origin also clears GPS anchor to avoid a discontinuous geographic overlay.
             anchored=false;lastGoodGpsNs=0;lastFixNs=0;declination=0;source="已手动重置本地原点";
             log("RESET_ORIGIN","manual",0,0,0,0);publish();
@@ -220,7 +235,13 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 hasRotation=true;
                 // Forward assumed to coincide with phone's +Y axis; only defensible when it is held pointing forward.
                 float[] orient=new float[3];SensorManager.getOrientation(matrix,orient);
-                heading=(float)Math.toDegrees(orient[0]);
+                if("walk".equals(mode))heading=(float)Math.toDegrees(orient[0]);
+            } else if(type==Sensor.TYPE_GYROSCOPE && "drive".equals(mode) && hasRotation) {
+                // Rotate device gyroscope into the earth frame. World +Z is up;
+                // vehicle bearing (clockwise from north) is minus yaw about +Z.
+                float yawUp=matrix[6]*value(ev,0)+matrix[7]*value(ev,1)+matrix[8]*value(ev,2);
+                driveModel.addYawRate(ev.timestamp,yawUp);
+                if(driveModel.initialized)heading=(float)Math.toDegrees(driveModel.headingRad);
             } else if(type==Sensor.TYPE_STEP_DETECTOR && "walk".equals(mode)) {
                 doStep(ev.timestamp);
             } else if(type==Sensor.TYPE_LINEAR_ACCELERATION){
@@ -247,23 +268,18 @@ public class TrackingService extends Service implements SensorEventListener, Loc
         // Raw double integral: intentionally uncorrected; expect fast drift.
         rawVE+=east*dt;rawVN+=north*dt;
         rawX+=rawVE*dt;rawY+=rawVN*dt;
-        // Secondary experimental leaky integrator, not a validated inertial navigation solution.
-        float deadband=.09f;
-        float ae=Math.abs(east)<deadband?0:east-Math.signum(east)*deadband;
-        float an=Math.abs(north)<deadband?0:north-Math.signum(north)*deadband;
-        velE+=ae*dt;velN+=an*dt;
-        float damp=(float)Math.exp(-dt/("drive".equals(mode)?14f:3f));
-        velE*=damp;velN*=damp;
-        float v=(float)Math.hypot(velE,velN);
-        if(v>MAX_CAR_SPEED){velE*=MAX_CAR_SPEED/v;velN*=MAX_CAR_SPEED/v;}
-        boolean quiet=accelMagnitude<.13;
-        if(quiet){if(stationarySinceNs==0)stationarySinceNs=time;}
-        else stationarySinceNs=0;
-        // Do not claim stationary from low acceleration alone: constant-speed driving is also quiet.
-        // Damped preview intentionally does not implement ZUPT without an external stop detector.
         if("drive".equals(mode)){
-            x+=velE*dt;y+=velN*dt;speed=(float)Math.hypot(velE,velN);
-            if(time-lastGoodGpsNs>3_000_000_000L)source="惯性估计（高漂移风险）";
+            driveModel.addWorldAcceleration(time,east,north);
+            if(driveModel.initialized){
+                x=driveModel.x;y=driveModel.y;speed=driveModel.speed;
+                heading=(float)Math.toDegrees(driveModel.headingRad);
+                source=blackoutActive?"GPS 已屏蔽 · 车辆模型推算":
+                        "车辆模型（GPS 可用时校正，失联后推算）";
+            } else {
+                // Zero coordinates before the first trustworthy moving GNSS fix.
+                source="等待室外 GPS 提供可靠速度与航向";
+                speed=0;
+            }
         }else{
             if(!stepSensor){
                 // Basic step fallback: peak over threshold with refractory interval; not calibrated.
@@ -271,11 +287,17 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 if(total>1.35f && time-lastStepNs>370_000_000L) doStep(time);
             }
             speed=0;
-            if(time-lastGoodGpsNs>3_000_000_000L)source="步数×步长（方向依赖手机朝向）";
+            source="步行：仅按有效步数移动";
         }
         if(time-lastPointNs>200_000_000L){
             lastPointNs=time;
             track.add(new TrackStore.Pt(x,y));rawTrack.add(new TrackStore.Pt(rawX,rawY));
+            if("drive".equals(mode) && driveModel.initialized){
+                baselineTrack.add(new TrackStore.Pt(driveModel.baselineX,driveModel.baselineY));
+                logAt(time,"DR_MODEL","baselineE="+driveModel.baselineX+";baselineN="+driveModel.baselineY+
+                        ";baseSpeed="+driveModel.baselineSpeed+";yawRadPerSec="+driveModel.lastYawRate+
+                        ";forwardAccel="+driveModel.lastForwardAccel,0,0,0,0);
+            }
             logAt(time,"ESTIMATE",source,0,0,0,0);
             publish();
         }
@@ -307,47 +329,87 @@ public class TrackingService extends Service implements SensorEventListener, Loc
                 float maxDistance=12f+acc*2f+("drive".equals(mode)?25f:4.5f)*dt;
                 if(dt>0 && dt<10 && Math.hypot(ne-lastFixE,nn-lastFixN)>maxDistance)trustworthy=false;
             }
-            gpsText=String.format(Locale.CHINA,"%s · ±%.1f m%s",provider,acc,trustworthy?("drive".equals(mode)?" · 可用于驾车校正":" · 仅观测，不改步行轨迹"):" · 仅记录不校正");
-            logAt(loc.getElapsedRealtimeNanos(),"GPS",provider,loc.getLatitude()==0?0:(float)loc.getLatitude(),(float)loc.getLongitude(),acc,loc.hasSpeed()?loc.getSpeed():-1);
+            gpsText=String.format(Locale.CHINA,"%s ±%.1f m · %s",provider,acc,
+                    blackoutActive?"对照真值，不参与计算":
+                    trustworthy?"可观测，符合要求时校正":"只记录不校正");
+            logAt(loc.getElapsedRealtimeNanos(),"GPS",provider+
+                    ";speedAccuracy="+(loc.hasSpeedAccuracy()?loc.getSpeedAccuracyMetersPerSecond():-1)+
+                    ";bearingAccuracy="+(loc.hasBearingAccuracy()?loc.getBearingAccuracyDegrees():-1),
+                    (float)loc.getLatitude(),(float)loc.getLongitude(),acc,loc.hasSpeed()?loc.getSpeed():-1);
             if(trustworthy){
                 if(!anchored){
                     anchored=true;anchorLat=loc.getLatitude();anchorLon=loc.getLongitude();
                     GeomagneticField mag=new GeomagneticField((float)anchorLat,(float)anchorLon,
                             loc.hasAltitude()?(float)loc.getAltitude():0,System.currentTimeMillis());
                     declination=mag.getDeclination();
-                    // Walking is step-driven. Setting a geographic anchor must NOT reset
-                    // or move the walking estimate, nor retroactively erase steps.
                     if("drive".equals(mode)) {
                         x=y=rawX=rawY=0;velE=velN=rawVE=rawVN=0;
-                        track.clear();rawTrack.clear();markers.clear();
+                        track.clear();rawTrack.clear();markers.clear();baselineTrack.clear();
                         track.add(new TrackStore.Pt(0,0));rawTrack.add(new TrackStore.Pt(0,0));
+                        baselineTrack.add(new TrackStore.Pt(0,0));
+                        driveModel.reset();
                     }
                     gpsTrack.clear();
-                    logAt(loc.getElapsedRealtimeNanos(),"ANCHOR_SET","true_north_gps_vs_magnetic_heading",0,0,0,0);
+                    logAt(loc.getElapsedRealtimeNanos(),"ANCHOR_SET","origin",0,0,0,0);
                 }
-                // Equirectangular short-distance projection, meters. Only meaningful near anchor.
                 double lat0=Math.toRadians(anchorLat);
                 float e=(float)((loc.getLongitude()-anchorLon)*111320.0*Math.cos(lat0));
                 float n=(float)((loc.getLatitude()-anchorLat)*111132.0);
                 gpsTrack.add(new TrackStore.Pt(e,n));
                 lastFixE=e;lastFixN=n;lastFixNs=loc.getElapsedRealtimeNanos();
-                // Keep the GPS observation as a separate diagnostic series in walk mode.
-                // Horizontal GPS jitter is NOT evidence that steps have occurred.
-                if("drive".equals(mode)) {
-                    x=e;y=n;
-                }
-                if("drive".equals(mode) && loc.hasSpeed() && loc.hasBearing()){
-                    float bearing=(float)Math.toRadians(loc.getBearing());
-                    velE=loc.getSpeed()*(float)Math.sin(bearing);
-                    velN=loc.getSpeed()*(float)Math.cos(bearing);
-                }
                 lastGoodGpsNs=loc.getElapsedRealtimeNanos();
-                if("drive".equals(mode)) {
-                    speed=loc.hasSpeed()?loc.getSpeed():speed;
-                    source="GPS 校正的驾车估计";
-                    track.add(new TrackStore.Pt(x,y));
-                } else {
-                    source="步行：仅按检测到的步数移动";
+                if("drive".equals(mode)){
+                    float gpsSpeed=loc.hasSpeed()?loc.getSpeed():-1f;
+                    float speedAcc=loc.hasSpeedAccuracy()?loc.getSpeedAccuracyMetersPerSecond():2f;
+                    float bearingAcc=loc.hasBearingAccuracy()?loc.getBearingAccuracyDegrees():35f;
+                    boolean goodSpeed=gpsSpeed>=0 && speedAcc<=1.0f;
+                    boolean goodCourse=loc.hasBearing() && gpsSpeed>=1.8f && bearingAcc<=30f;
+                    long stamp=loc.getElapsedRealtimeNanos();
+                    // The automatic outage simulation starts only after a full
+                    // 15 seconds of continuously usable moving GNSS measurements.
+                    if(simulateBlackout && !blackoutActive && !blackoutFinished){
+                        if(goodSpeed && goodCourse){
+                            if(sustainedDrivingNs==0)sustainedDrivingNs=stamp;
+                            if(stamp-sustainedDrivingNs>=15_000_000_000L && driveModel.initialized){
+                                blackoutActive=true;blackoutStartNs=stamp;
+                                logAt(stamp,"BLACKOUT_START","GPS observations ignored for 120s",e,n,driveModel.speed,0);
+                            }
+                        } else sustainedDrivingNs=0;
+                    }
+                    // Freeze GNSS corrections during the simulated outage.
+                    if(!blackoutActive && goodSpeed){
+                        if(goodCourse){
+                            driveModel.setGpsFix(e,n,gpsSpeed,loc.getBearing(),true);
+                        } else if(gpsSpeed<.30f && speedAcc<.35f && driveModel.initialized){
+                            // Genuine zero speed must be independently confirmed
+                            // by GNSS Doppler, NOT only by a quiet accelerometer.
+                            driveModel.setKnownStop(e,n);
+                            logAt(stamp,"GPS_ZERO_SPEED","trusted velocity",0,0,0,0);
+                        }
+                        if(driveModel.initialized){
+                            x=driveModel.x;y=driveModel.y;speed=driveModel.speed;
+                            heading=(float)Math.toDegrees(driveModel.headingRad);
+                            source=blackoutFinished?"测试结束 · GPS 恢复校正":"GPS 校正 · 车辆模型";
+                            track.add(new TrackStore.Pt(x,y));
+                        }
+                    }
+                    if(blackoutActive && driveModel.initialized){
+                        float seconds=(stamp-blackoutStartNs)*1e-9f;
+                        errorNow=(float)Math.hypot(driveModel.x-e,driveModel.y-n);
+                        baseErrorNow=(float)Math.hypot(driveModel.baselineX-e,driveModel.baselineY-n);
+                        logAt(stamp,"GPS_REFERENCE",
+                                "elapsed="+seconds+";gpsAcc="+acc+";speedAcc="+speedAcc,
+                                e,n,errorNow,baseErrorNow);
+                        if(seconds>=30f && Float.isNaN(err30)){err30=errorNow;baseErr30=baseErrorNow;}
+                        if(seconds>=60f && Float.isNaN(err60)){err60=errorNow;baseErr60=baseErrorNow;}
+                        if(seconds>=120f && Float.isNaN(err120)){
+                            err120=errorNow;baseErr120=baseErrorNow;
+                            blackoutActive=false;blackoutFinished=true;
+                            logAt(stamp,"BLACKOUT_END","GPS corrections resumed on next fix",e,n,errorNow,baseErrorNow);
+                        }
+                    }
+                }else{
+                    source="步行：GPS 仅观测，不改写步行轨迹";
                 }
             }
             publish();
@@ -378,7 +440,14 @@ public class TrackingService extends Service implements SensorEventListener, Loc
         s.east=x;s.north=y;s.rawEast=rawX;s.rawNorth=rawY;
         s.speed=speed;s.heading=heading;s.stride=stride;s.steps=steps;
         s.gpsAnchored=anchored;s.sensorHeading=hasRotation;s.lat=anchorLat;s.lon=anchorLon;
-        s.fused.addAll(track);s.inertial.addAll(rawTrack);s.gps.addAll(gpsTrack);s.marks.addAll(markers);
+        s.blackoutRequested=simulateBlackout;s.blackoutActive=blackoutActive;s.blackoutFinished=blackoutFinished;
+        s.blackoutSeconds=blackoutStartNs==0?0:
+                (SystemClock.elapsedRealtimeNanos()-blackoutStartNs)/1_000_000_000L;
+        s.errorNow=errorNow;s.baseErrorNow=baseErrorNow;
+        s.error30=err30;s.error60=err60;s.error120=err120;
+        s.baseError30=baseErr30;s.baseError60=baseErr60;s.baseError120=baseErr120;
+        s.baselineSpeed=driveModel.baselineSpeed;
+        s.fused.addAll(track);s.inertial.addAll(rawTrack);s.gps.addAll(gpsTrack);s.marks.addAll(markers);s.baseline.addAll(baselineTrack);
         TrackStore.INSTANCE.set(s);
     }
     public static File lastFile(Context context){
