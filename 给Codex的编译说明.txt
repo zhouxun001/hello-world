@@ -1,0 +1,7 @@
+这是 Android 原生 Java 项目“停车轨迹实验室 v0.1.0”。
+请在 Windows 11 有 Android Studio/SDK 的环境下：
+1. 打开整个 parking-track-lab 项目，安装 Gradle 和 SDK 35 所需依赖。
+2. 执行 :app:assembleDebug，首先解决全部编译错误。
+3. 如果有可用安卓设备，使用 adb 安装并做启动/权限/开始采集/结束采集/导出 CSV 的烟雾测试。缺真机不要谎称已真机测试。
+4. 生成 app/build/outputs/apk/debug/app-debug.apk 供 vivo X200 Pro 安装。
+5. 保留所有实验数据本地导出和算法声明，切勿把惯性估计冒充成实际位置。
